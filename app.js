@@ -1,0 +1,132 @@
+const createError = require('http-errors');
+const express = require('express');
+const path = require('path');
+const cookieParser = require('cookie-parser');
+const logger = require('morgan');
+
+// STEP 1a - install the paypal-rest-sdk npm package: https://www.npmjs.com/package/paypal-rest-sdk
+// STEP 1b - import the PayPal REST SDK in app.js
+const paypal = require('paypal-rest-sdk');
+// STEP 1c - import the PayPal REST SDK in payment.js controller
+
+
+const indexRouter = require('./controllers/index');
+const usersRouter = require('./controllers/users');
+// reference our new custom controllers
+const employers = require('./controllers/employers');
+const cities = require('./controllers/cities');
+const auth = require('./controllers/auth');
+const payment = require('./controllers/payment');
+
+const app = express();
+
+// view engine setup
+app.set('views', path.join(__dirname, 'views'));
+app.set('view engine', 'hbs');
+
+app.use(logger('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// use dotenv to read .env file with config vars
+if (process.env.NODE_ENV != 'production') {
+  require('dotenv').config()
+}
+
+// mongodb connection using mongoose
+const mongoose = require('mongoose');
+
+mongoose.connect(process.env.CONNECTION_STRING)
+.then((res) => {
+  console.log('Connected to MongoDB');
+})
+.catch(() => {
+  console.log('Connection to MongoDB Failed');
+});
+
+// passport auth config
+const passport = require('passport');
+const session = require('express-session');
+
+app.use(session({
+  secret: process.env.PASSPORT_SECRET,
+  resave: true,
+  saveUninitialized: false
+}));
+
+// start passport w/session support
+app.use(passport.initialize());
+app.use(passport.session())
+
+const User = require('./models/user');
+passport.use(User.createStrategy());
+
+// read / write session vars
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
+
+// google auth strategy for passport
+// 1. authenticate google app w/api keys
+// 2. check if we already have this user w/this Google id in the users collection
+// 3. if user not found, create a new Google user in our users collection
+const googleStrategy = require('passport-google-oauth20').Strategy;
+passport.use(new googleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: process.env.GOOGLE_CALLBACK_URL
+}, (accessToken, refreshToken, profile, done) => {
+  User.findOrCreate({oauthId: profile.id }, {
+    username: profile.displayName,
+    oauthProvider: 'Google'
+  }, (err, user) => {
+    return done(err, user);
+  })
+}));
+
+// STEP 3a - paste from the documentation
+  /* STEP 3b - replace the default value with our own credentials in .env: 
+     https://developer.paypal.com/dashboard/applications/sandbox */
+  
+    paypal.configure({
+      'mode': 'sandbox', //sandbox or live
+      'client_id':process.env.PAYPAL_CLIENT_ID,
+      'client_secret':process.env.PAYPAL_CLIENT_SECRET,
+    });
+ 
+app.use('/', indexRouter);
+app.use('/users', usersRouter);
+// map all requests at /employers to our own employers.js controller
+app.use('/employers', employers);
+app.use('/cities', cities);
+app.use('/auth', auth);
+app.use('/payment', payment);
+
+// add hbs extension function to select the correct dropdown option when editing
+const hbs = require('hbs');
+hbs.registerHelper('selectOption', (currentValue, selectedValue) => {
+  let selectedProperty = '';
+  if (currentValue == selectedValue) {
+    selectedProperty = ' selected';
+  }
+  return new hbs.SafeString(`<option${selectedProperty}>${currentValue}</option>`);
+});
+
+// catch 404 and forward to error handler
+app.use(function(req, res, next) {
+  next(createError(404));
+});
+
+// error handler
+app.use(function(err, req, res, next) {
+  // set locals, only providing error in development
+  res.locals.message = err.message;
+  res.locals.error = req.app.get('env') === 'development' ? err : {};
+
+  // render the error page
+  res.status(err.status || 500);
+  res.render('error');
+});
+
+module.exports = app;
